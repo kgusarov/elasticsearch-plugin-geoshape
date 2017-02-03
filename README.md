@@ -6,7 +6,7 @@ Installation
 ------------
 
 ```
-./elasticsearch/bin/plugin install kgusarov/elasticsearch-plugin-geoshape/{branch|version}
+./elasticsearch/bin/plugin install https://github.com/kgusarov/elasticsearch-plugin-geoshape/releases/download/v2.2.0.1/v2.2.0.1.zip
 ```
 
 | Elasticsearch Version  | Plugin Version      | GitHub Tag |
