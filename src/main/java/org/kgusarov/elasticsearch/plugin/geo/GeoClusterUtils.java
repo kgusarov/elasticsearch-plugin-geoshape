@@ -1,4 +1,4 @@
-package org.kgusarov.elasticsearch.search.aggregations.bucket.geohashclustering;
+package org.kgusarov.elasticsearch.plugin.geo;
 
 import org.elasticsearch.common.geo.GeoUtils;
 

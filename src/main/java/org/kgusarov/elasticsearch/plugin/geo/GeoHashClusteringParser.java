@@ -1,4 +1,4 @@
-package org.kgusarov.elasticsearch.search.aggregations.bucket.geohashclustering;
+package org.kgusarov.elasticsearch.plugin.geo;
 
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.search.aggregations.Aggregator;
@@ -22,7 +22,7 @@ public class GeoHashClusteringParser implements Aggregator.Parser {
         return InternalGeoHashClustering.TYPE.name();
     }
 
-    public static final int DEFAULT_ZOOM = 0;
+    public static final int DEFAULT_ZOOM = 10;
     public static final int DEFAULT_DISTANCE = 100;
 
     @Override

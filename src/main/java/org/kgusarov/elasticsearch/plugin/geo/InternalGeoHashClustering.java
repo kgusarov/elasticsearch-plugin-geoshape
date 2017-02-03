@@ -1,4 +1,4 @@
-package org.kgusarov.elasticsearch.search.aggregations.bucket.geohashclustering;
+package org.kgusarov.elasticsearch.plugin.geo;
 
 import com.spatial4j.core.distance.DistanceUtils;
 import org.apache.lucene.util.GeoHashUtils;
@@ -42,15 +42,18 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
         long geohashAsLong;
         Set<Long> geohashesList;
         long docCount;
-        GeoPoint centroid;
         InternalAggregations aggregations;
+        ClusterBounds clusterBounds;
 
-        Bucket(final long geohashAsLong, final GeoPoint centroid, final long docCount, final InternalAggregations aggregations) {
+        Bucket(final long geohashAsLong, final ClusterBounds clusterBounds,
+               final long docCount, final InternalAggregations aggregations) {
+
             this.docCount = docCount;
             this.aggregations = aggregations;
             this.geohashAsLong = geohashAsLong;
+            this.clusterBounds = clusterBounds;
+
             geohashesList = new HashSet<>();
-            this.centroid = centroid;
         }
 
         @Override
@@ -63,17 +66,14 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
             return geohashAsLong;
         }
 
-        long getGeohashAsLong() {
-            return geohashAsLong;
-        }
-
-        void setGeohashAsLong(final long geohashAsLong) {
-            this.geohashAsLong = geohashAsLong;
+        @Override
+        public ClusterBounds getClusterBounds() {
+            return clusterBounds;
         }
 
         @Override
         public GeoPoint getClusterCenter() {
-            return centroid;
+            return clusterBounds.getCentroid();
         }
 
         @Override
@@ -107,18 +107,20 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
                 }
                 aggregationsList.add(bucket.aggregations);
             }
-            reduced.aggregations = InternalAggregations.reduce(aggregationsList, reduceContext);
+
+            if (reduced != null) {
+                reduced.aggregations = InternalAggregations.reduce(aggregationsList, reduceContext);
+            }
+
             return reduced;
         }
 
         public void merge(final Bucket bucketToMergeIn, final ReduceContext reduceContext) {
-
             final long mergedDocCount = bucketToMergeIn.docCount + docCount;
-            final double newCentroidLat = (centroid.getLat() * docCount + bucketToMergeIn.centroid.getLat() * bucketToMergeIn.docCount) / mergedDocCount;
-            final double newCentroidLon = (centroid.getLon() * docCount + bucketToMergeIn.centroid.getLon() * bucketToMergeIn.docCount) / mergedDocCount;
-            bucketToMergeIn.centroid = new GeoPoint(newCentroidLat, newCentroidLon);
+
             bucketToMergeIn.geohashesList.addAll(geohashesList);
             bucketToMergeIn.docCount = mergedDocCount;
+            bucketToMergeIn.clusterBounds.merge(clusterBounds);
 
             final List<InternalAggregations> aggregationsList = new ArrayList<>();
             aggregationsList.add(aggregations);
@@ -140,7 +142,13 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
 
             geohashesList = geohashes;
             docCount = in.readLong();
-            centroid = new GeoPoint(in.readDouble(), in.readDouble());
+
+            final double latMin = in.readDouble();
+            final double latMax = in.readDouble();
+            final double lonMin = in.readDouble();
+            final double lonMax = in.readDouble();
+
+            clusterBounds = new ClusterBounds(latMin, latMax, lonMin, lonMax);
             aggregations = InternalAggregations.readAggregations(in);
         }
 
@@ -153,18 +161,19 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
             }
 
             out.writeLong(docCount);
-            final double lat = centroid.getLat();
-            final double lon = centroid.getLon();
 
-            out.writeDouble(lat);
-            out.writeDouble(lon);
+            out.writeDouble(clusterBounds.getLatMin());
+            out.writeDouble(clusterBounds.getLatMax());
+            out.writeDouble(clusterBounds.getLonMin());
+            out.writeDouble(clusterBounds.getLonMax());
+
             aggregations.writeTo(out);
         }
 
         @Override
         public XContentBuilder toXContent(final XContentBuilder builder, final Params params) throws IOException {
-            final double lat = centroid.getLat();
-            final double lon = centroid.getLon();
+            final double lat = getClusterCenter().getLat();
+            final double lon = getClusterCenter().getLon();
 
             builder.startObject();
             builder.field("geohashAsLong", geohashAsLong);
@@ -173,6 +182,18 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
             builder.field("docCount", docCount);
             builder.field("lat", lat);
             builder.field("lon", lon);
+
+            final double latMin = clusterBounds.getLatMin();
+            final double latMax = clusterBounds.getLatMax();
+            final double lonMin = clusterBounds.getLonMin();
+            final double lonMax = clusterBounds.getLonMax();
+
+            builder.startObject("cluster_bounds");
+            builder.field("top_left");
+            ShapeBuilder.newPoint(lonMin, latMax).toXContent(builder, params);
+            builder.field("bottom_right");
+            ShapeBuilder.newPoint(lonMax, latMin).toXContent(builder, params);
+            builder.endObject();
 
             aggregations.toXContent(builder, params);
 
@@ -208,7 +229,7 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
 
     @Override
     public Bucket createBucket(final InternalAggregations aggregations, final Bucket prototype) {
-        return new Bucket(prototype.geohashAsLong, prototype.centroid, prototype.docCount, aggregations);
+        return new Bucket(prototype.geohashAsLong, prototype.clusterBounds, prototype.docCount, aggregations);
     }
 
     @Override
@@ -245,86 +266,84 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
 
     @Override
     public InternalGeoHashClustering doReduce(final List<InternalAggregation> aggregations, final ReduceContext reduceContext) {
-        LongObjectPagedHashMap<List<Bucket>> buckets = null;
-
-        for (final InternalAggregation aggregation : aggregations) {
-            final InternalGeoHashClustering grid = (InternalGeoHashClustering) aggregation;
-            if (buckets == null) {
-                buckets = new LongObjectPagedHashMap<>(grid.buckets.size(), reduceContext.bigArrays());
-            }
-
-            for (final Bucket bucket : grid.buckets) {
-                List<Bucket> existingBuckets = buckets.get(bucket.geohashAsLong);
-                if (existingBuckets == null) {
-                    existingBuckets = new ArrayList<>(aggregations.size());
-                    buckets.put(bucket.geohashAsLong, existingBuckets);
-                }
-                existingBuckets.add(bucket);
-            }
-        }
-
-        final LongObjectPagedHashMap<Bucket> clusterMap = new LongObjectPagedHashMap<>(buckets.size(), reduceContext.bigArrays());
-        final List<Long> bucketList = new ArrayList<>();
-
-        for (final LongObjectPagedHashMap.Cursor<List<Bucket>> cursor : buckets) {
-            final List<Bucket> sameCellBuckets = cursor.value;
-            final Bucket bucket = sameCellBuckets.get(0).reduce(sameCellBuckets, reduceContext);
-            clusterMap.put(sameCellBuckets.get(0).geohashAsLong, bucket);
-            bucketList.add(sameCellBuckets.get(0).geohashAsLong);
-        }
-
-        Collections.sort(bucketList);
-
-        final Iterator<Long> iterBucket = bucketList.iterator();
-        loop1:
-        while (iterBucket.hasNext()) {
-            final Long bucketHash = iterBucket.next();
-            final Bucket bucket = clusterMap.get(bucketHash);
-            final Collection<? extends CharSequence> neighbors = GeoHashUtils.neighbors(bucket.getKey());
-
-            for (final CharSequence neighbor : neighbors) {
-                final String neigh = neighbor.toString();
-                final GeoPoint geoPointNeighbor = GeoPoint.fromGeohash(neigh);
-                Bucket neighborBucket = clusterMap.get(GeoHashUtils.longEncode(geoPointNeighbor.getLat(),
-                        geoPointNeighbor.getLon(), neigh.length()));
-                if (neighborBucket == null) {
-                    // We test parent neighbor
-                    if (neigh.length() > 1) {
-                        neighborBucket = clusterMap.get(GeoHashUtils.longEncode(geoPointNeighbor.getLat(),
-                                geoPointNeighbor.getLon(), neigh.length() - 1));
+        try (final LongObjectPagedHashMap<List<Bucket>> bucketMap = new LongObjectPagedHashMap<>(reduceContext.bigArrays());
+             final LongObjectPagedHashMap<Bucket> clusterMap = new LongObjectPagedHashMap<>(reduceContext.bigArrays())
+        ) {
+            for (final InternalAggregation aggregation : aggregations) {
+                final InternalGeoHashClustering grid = (InternalGeoHashClustering) aggregation;
+                for (final Bucket bucket : grid.buckets) {
+                    List<Bucket> existingBuckets = bucketMap.get(bucket.geohashAsLong);
+                    if (existingBuckets == null) {
+                        existingBuckets = new ArrayList<>(aggregations.size());
+                        bucketMap.put(bucket.geohashAsLong, existingBuckets);
                     }
+                    existingBuckets.add(bucket);
+                }
+            }
+
+            final List<Long> bucketList = new ArrayList<>();
+
+            for (final LongObjectPagedHashMap.Cursor<List<Bucket>> cursor : bucketMap) {
+                final List<Bucket> sameCellBuckets = cursor.value;
+                final Bucket bucket = sameCellBuckets.get(0).reduce(sameCellBuckets, reduceContext);
+                clusterMap.put(sameCellBuckets.get(0).geohashAsLong, bucket);
+                bucketList.add(sameCellBuckets.get(0).geohashAsLong);
+            }
+
+            Collections.sort(bucketList);
+
+            final Iterator<Long> iterBucket = bucketList.iterator();
+            loop1:
+            while (iterBucket.hasNext()) {
+                final Long bucketHash = iterBucket.next();
+                final Bucket bucket = clusterMap.get(bucketHash);
+                final Collection<? extends CharSequence> neighbors = GeoHashUtils.neighbors(bucket.getKey());
+
+                for (final CharSequence neighbor : neighbors) {
+                    final String neigh = neighbor.toString();
+                    final GeoPoint geoPointNeighbor = GeoPoint.fromGeohash(neigh);
+                    Bucket neighborBucket = clusterMap.get(GeoHashUtils.longEncode(geoPointNeighbor.getLon(),
+                            geoPointNeighbor.getLat(), neigh.length()));
                     if (neighborBucket == null) {
+                        // We test parent neighbor
+                        if (neigh.length() > 1) {
+                            neighborBucket = clusterMap.get(GeoHashUtils.longEncode(geoPointNeighbor.getLon(),
+                                    geoPointNeighbor.getLat(), neigh.length() - 1));
+                        }
+                        if (neighborBucket == null) {
+                            continue;
+                        }
+                    }
+                    if (neighborBucket.geohashesList.contains(bucket.geohashAsLong)) {
                         continue;
                     }
+
+                    if (shouldCluster(bucket, neighborBucket)) {
+                        bucket.merge(neighborBucket, reduceContext);
+                        for (final long superClusterHash : bucket.geohashesList) {
+                            clusterMap.put(superClusterHash, neighborBucket);
+                        }
+                        iterBucket.remove();
+                        continue loop1;
+                    }
                 }
-                if (neighborBucket.geohashesList.contains(bucket.geohashAsLong)) {
+            }
+
+            final Set<Long> added = new HashSet<>();
+            final List<Bucket> res = new ArrayList<>();
+            for (final LongObjectPagedHashMap.Cursor<Bucket> cursor : clusterMap) {
+                final Bucket buck = cursor.value;
+                if (added.contains(buck.geohashAsLong)) {
                     continue;
                 }
 
-                if (shouldCluster(bucket, neighborBucket)) {
-                    bucket.merge(neighborBucket, reduceContext);
-                    for (final long superClusterHash : bucket.geohashesList) {
-                        clusterMap.put(superClusterHash, neighborBucket);
-                    }
-                    iterBucket.remove();
-                    continue loop1;
-                }
+                res.add(buck);
+                added.add(buck.geohashAsLong);
             }
-        }
 
-        final Set<Long> added = new HashSet<>();
-        final List<Bucket> res = new ArrayList<>();
-        for (final LongObjectPagedHashMap.Cursor<Bucket> cursor : clusterMap) {
-            final Bucket buck = cursor.value;
-            if (added.contains(buck.geohashAsLong)) {
-                continue;
-            }
-            res.add(buck);
-            added.add(buck.geohashAsLong);
+            // Add sorting
+            return new InternalGeoHashClustering(getName(), pipelineAggregators(), getMetaData(), res, distance, zoom);
         }
-
-        // Add sorting
-        return new InternalGeoHashClustering(getName(), pipelineAggregators(), getMetaData(), res, distance, zoom);
     }
 
     public boolean shouldCluster(final Bucket bucket, final Bucket bucket2) {
@@ -340,7 +359,6 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
         final double meterByPixel = GeoClusterUtils.getMeterByPixel(zoom, (lat1 + lat2) / 2);
 
         return distance >= curDistance / meterByPixel;
-
     }
 
     @Override
@@ -350,21 +368,28 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
         name = in.readString();
         final int size = in.readVInt();
         final List<Bucket> buckets = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
 
-            final double centroidLat = in.readDouble();
-            final double centroidLon = in.readDouble();
+        for (int i = 0; i < size; i++) {
+            final double latMin = in.readDouble();
+            final double latMax = in.readDouble();
+            final double lonMin = in.readDouble();
+            final double lonMax = in.readDouble();
+
+            final ClusterBounds clusterBounds = new ClusterBounds(latMin, latMax, lonMin, lonMax);
             final int nbGeohash = in.readInt();
             final Set<Long> geohashList = new HashSet<>(nbGeohash);
+
             for (int j = 0; j < nbGeohash; j++) {
                 geohashList.add(in.readLong());
             }
-            final Bucket bucket = new Bucket(in.readLong(), new GeoPoint(centroidLat, centroidLon), in.readVLong(),
-                    InternalAggregations.readAggregations(in));
+
+            final Bucket bucket = new Bucket(in.readLong(), clusterBounds,
+                    in.readVLong(), InternalAggregations.readAggregations(in));
 
             bucket.geohashesList = geohashList;
             buckets.add(bucket);
         }
+
         this.buckets = buckets;
         bucketMap = null;
     }
@@ -376,8 +401,10 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
         out.writeString(name);
         out.writeVInt(buckets.size());
         for (final Bucket bucket : buckets) {
-            out.writeDouble(bucket.getClusterCenter().getLat());
-            out.writeDouble(bucket.getClusterCenter().getLon());
+            out.writeDouble(bucket.getClusterBounds().getLatMin());
+            out.writeDouble(bucket.getClusterBounds().getLatMax());
+            out.writeDouble(bucket.getClusterBounds().getLonMin());
+            out.writeDouble(bucket.getClusterBounds().getLonMax());
 
             out.writeInt(bucket.geohashesList.size());
             for (final long geohash : bucket.geohashesList) {
@@ -397,6 +424,7 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
             builder.startObject();
             builder.field(CommonFields.KEY, bucket.getKeyAsString());
             builder.field(CommonFields.DOC_COUNT, bucket.getDocCount());
+
             final Set<String> geohashGridsString = new HashSet<>(bucket.geohashesList.size());
             geohashGridsString.addAll(bucket.geohashesList.stream()
                     .map(GeoHashUtils::stringEncode)
@@ -406,6 +434,19 @@ public class InternalGeoHashClustering extends InternalMultiBucketAggregation<In
             builder.field(new XContentBuilderString("cluster_center"));
             ShapeBuilder.newPoint(bucket.getClusterCenter().getLon(), bucket.getClusterCenter().getLat()).toXContent(builder, params);
             ((InternalAggregations) bucket.getAggregations()).toXContentInternal(builder, params);
+
+            final double latMin = bucket.getClusterBounds().getLatMin();
+            final double latMax = bucket.getClusterBounds().getLatMax();
+            final double lonMin = bucket.getClusterBounds().getLonMin();
+            final double lonMax = bucket.getClusterBounds().getLonMax();
+
+            builder.startObject("cluster_bounds");
+            builder.field("top_left");
+            ShapeBuilder.newPoint(lonMin, latMax).toXContent(builder, params);
+            builder.field("bottom_right");
+            ShapeBuilder.newPoint(lonMax, latMin).toXContent(builder, params);
+            builder.endObject();
+
             builder.endObject();
         }
         builder.endArray();

@@ -1,4 +1,4 @@
-package org.kgusarov.elasticsearch.search.aggregations.bucket.geohashclustering;
+package org.kgusarov.elasticsearch.plugin.geo;
 
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.util.GeoHashUtils;
@@ -29,45 +29,9 @@ public class GeoHashClusteringAggregator extends BucketsAggregator {
 
     private final ValuesSource.GeoPoint valuesSource;
     private final LongHash bucketOrds;
-    private final LongObjectPagedHashMap<ClusterCollector> clusterCollectors;
+    private final LongObjectPagedHashMap<ClusterBounds> clusterCollectors;
     private final int zoom;
     private final int distance;
-
-    @SuppressWarnings({"NestedAssignment", "NestedMethodCall"})
-    public static class ClusterCollector {
-        private double latMin;
-        private double latMax;
-        private double lonMin;
-        private double lonMax;
-
-        public ClusterCollector(final GeoPoint geoPoint) {
-            latMin = latMax = geoPoint.getLat();
-            lonMin = lonMax = geoPoint.getLon();
-        }
-
-        public void addPoint(final GeoPoint point) {
-            latMin = Math.min(point.getLat(), latMin);
-            latMax = Math.max(point.getLat(), latMax);
-            lonMin = Math.min(point.getLon(), lonMin);
-            lonMax = Math.max(point.getLon(), lonMax);
-        }
-
-        public double getLatMin() {
-            return latMin;
-        }
-
-        public double getLatMax() {
-            return latMax;
-        }
-
-        public double getLonMin() {
-            return lonMin;
-        }
-
-        public double getLonMax() {
-            return lonMax;
-        }
-    }
 
     public GeoHashClusteringAggregator(final String name, final AggregatorFactories factories, final ValuesSource.GeoPoint valuesSource,
                                        final AggregationContext aggregationContext, final Aggregator parent,
@@ -92,26 +56,29 @@ public class GeoHashClusteringAggregator extends BucketsAggregator {
 
     @Override
     public InternalGeoHashClustering buildAggregation(final long owningBucketOrdinal) throws IOException {
+        if (valuesSource == null) {
+            return buildEmptyAggregation();
+        }
+
         assert owningBucketOrdinal == 0;
         final List<InternalGeoHashClustering.Bucket> res = new ArrayList<>();
 
         for (long i = 0; i < bucketOrds.size(); i++) {
             final long clusterHash = bucketOrds.get(i);
 
-            final ClusterCollector coll = clusterCollectors.get(clusterHash);
+            final ClusterBounds coll = clusterCollectors.get(clusterHash);
             final InternalGeoHashClustering.Bucket bucket = new OrdinalBucket();
 
             bucket.docCount = bucketDocCount(i);
             bucket.aggregations = bucketAggregations(i);
             bucket.geohashAsLong = clusterHash;
             bucket.geohashesList.add(clusterHash);
-
-            bucket.centroid = new GeoPoint((coll.getLatMin() + coll.getLatMax()) / 2, (coll.getLonMin() + coll.getLonMax()) / 2);
+            bucket.clusterBounds = coll;
 
             res.add(bucket);
         }
 
-        return new InternalGeoHashClustering(name, pipelineAggregators(), metaData(),res, distance, zoom);
+        return new InternalGeoHashClustering(name, pipelineAggregators(), metaData(), res, distance, zoom);
     }
 
     @Override
@@ -142,20 +109,20 @@ public class GeoHashClusteringAggregator extends BucketsAggregator {
                         pointPrecision = 12;
                     }
 
-                    final long clusterHashLong = GeoHashUtils.longEncode(geoPoint.getLat(), geoPoint.getLon(), pointPrecision);
-                    final ClusterCollector collec;
+                    final long clusterHashLong = GeoHashUtils.longEncode(geoPoint.getLon(), geoPoint.getLat(), pointPrecision);
+                    final ClusterBounds bounds;
                     long bucketOrdinal2 = bucketOrds.add(clusterHashLong);
                     if (bucketOrdinal2 < 0) { // already seen
                         bucketOrdinal2 = -1 - bucketOrdinal2;
-                        collec = clusterCollectors.get(clusterHashLong);
-                        collec.addPoint(geoPoint);
+                        bounds = clusterCollectors.get(clusterHashLong);
+                        bounds.addPoint(geoPoint);
                         collectExistingBucket(sub, doc, bucketOrdinal2);
                     } else {
-                        collec = new ClusterCollector(geoPoint);
+                        bounds = new ClusterBounds(geoPoint);
                         collectBucket(sub, doc, bucketOrdinal2);
                     }
 
-                    clusterCollectors.put(clusterHashLong, collec);
+                    clusterCollectors.put(clusterHashLong, bounds);
                 }
             }
         };
