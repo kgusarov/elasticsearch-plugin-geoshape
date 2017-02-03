@@ -9,9 +9,9 @@ Installation
 ./elasticsearch/bin/plugin install kgusarov/elasticsearch-plugin-geoshape/{branch|version}
 ```
 
-| Elasticsearch Version  | Plugin Version      |
-|------------------------|---------------------|
-| 2.2.0                  | 2.2.0               |
+| Elasticsearch Version  | Plugin Version      | GitHub Tag |
+|------------------------|---------------------| -----------|
+| 2.2.0                  | 2.2.0.1             | v2.2.0.1   |
 
 ### Geohash clustering aggregation
 
