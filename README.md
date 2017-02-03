@@ -6,12 +6,12 @@ Installation
 ------------
 
 ```
-bin/plugin --install geo-clustering-plugin --url "https://github.com/kgusarov/elasticsearch-plugin-geoshape/TBD..."
+./elasticsearch/bin/plugin install kgusarov/elasticsearch-plugin-geoshape/{branch|version}
 ```
 
 | Elasticsearch Version  | Plugin Version      |
 |------------------------|---------------------|
-| 2.2.0                  | 2.2.0.0             |
+| 2.2.0                  | 2.2.0               |
 
 ### Geohash clustering aggregation
 
